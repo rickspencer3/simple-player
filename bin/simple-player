@@ -1,0 +1,195 @@
+#!/usr/bin/python
+# -*- Mode: Python; coding: utf-8; indent-tabs-mode: nil; tab-width: 4 -*-
+### BEGIN LICENSE
+# This file is in the public domain
+### END LICENSE
+
+import sys
+import os
+import gtk
+import logging
+from quickly import prompts
+from quickly.widgets.dictionary_grid import DictionaryGrid
+from quickly.widgets.media_player_box import MediaPlayerBox
+import goocanvas
+
+import gettext
+from gettext import gettext as _
+gettext.textdomain('simple-player')
+
+# Add project root directory (enable symlink and trunk execution)
+PROJECT_ROOT_DIRECTORY = os.path.abspath(
+    os.path.dirname(os.path.dirname(os.path.realpath(sys.argv[0]))))
+
+python_path = []
+if os.path.abspath(__file__).startswith('/opt'):
+    syspath = sys.path[:] # copy to avoid infinite loop in pending objects
+    for path in syspath:
+        opt_path = path.replace('/usr', '/opt/extras.ubuntu.com/simple_player')
+        python_path.insert(0, opt_path)
+        sys.path.insert(0, opt_path)
+if (os.path.exists(os.path.join(PROJECT_ROOT_DIRECTORY, 'simple_player'))
+    and PROJECT_ROOT_DIRECTORY not in sys.path):
+    python_path.insert(0, PROJECT_ROOT_DIRECTORY)
+    sys.path.insert(0, PROJECT_ROOT_DIRECTORY)
+if python_path:
+    os.putenv('PYTHONPATH', "%s:%s" % (os.getenv('PYTHONPATH', ''), ':'.join(python_path))) # for subprocesses
+
+
+from simple_player import (BaseSimplePlayerWindow)
+import simple_player.helpers as helpers
+from simple_player.preferences import preferences
+
+# See BaseSimplePlayerWindow.py for more details about how this class works
+class SimplePlayerWindow(BaseSimplePlayerWindow.BaseSimplePlayerWindow):
+    __gtype_name__ = "SimplePlayerWindow"
+    
+    def finish_initializing(self, builder):
+        """Set up the main window"""
+        super(SimplePlayerWindow, self).finish_initializing(builder)
+
+        # Code for other initialization actions should be added here.
+        preferences.connect('changed', self.on_preferences_changed)
+
+        self.supported_video_formats = [".ogv",".avi"]
+        self.supported_audio_formats = [".ogg",".mp3"]
+
+        self.player = MediaPlayerBox(True)
+        self.player.remove(self.player.controls)
+        open_button = gtk.ToolButton()
+        open_button.set_stock_id(gtk.STOCK_OPEN)
+        open_button.show()
+        open_button.connect("clicked",self.openbutton_clicked_event)
+        self.player.controls.insert(open_button, 0)
+        self.ui.hbox1.pack_start(self.player.controls, True)
+
+        self.player.connect("end-of-file",self.play_next_file)
+        self.player.show()
+        self.ui.hpaned1.add2(self.player)
+
+        self.goocanvas = goocanvas.Canvas()
+        self.goocanvas.show()
+
+        logo_file = helpers.get_media_file("background.png")
+        logo_file = logo_file.replace("file:///","")
+        logo_pb = gtk.gdk.pixbuf_new_from_file(logo_file)
+        root_item=self.goocanvas.get_root_item()
+        goocanvas.Image(parent=root_item, pixbuf=logo_pb,x=20,y=20)
+
+        note_file = helpers.get_media_file("note.png")
+        note_file = note_file.replace("file:///","")
+        note_pb = gtk.gdk.pixbuf_new_from_file(note_file)
+        note = goocanvas.Image(parent=root_item, pixbuf=note_pb,x=175,y=255)
+        note.scale(.75,.6)
+
+        self.song_text = goocanvas.Text(parent=root_item,text="", x=5, y=5)
+        self.song_text.set_property("font","Ubuntu")
+        self.song_text.scale(2,2)
+
+
+    def play_next_file(self, widget, file_uri):
+        #get a reference to the current grid
+        grid = self.ui.scrolledwindow1.get_children()[0]
+
+        #get a gtk selection object from that grid
+        selection = grid.get_selection()
+
+        #get the selected row, and just return if none are selected
+        model, rows = selection.get_selected_rows()
+        if len(rows) == 0:
+            return
+
+        #calculate the next row to be selected by finding
+        #the last selected row in the list of selected rows
+        #and incrementing by 1
+        next_to_select = rows[-1][0] + 1
+
+        #if this is not the last row in the last
+        #unselect all rows, select the next row, and call the
+        #play_file handle, passing in the now selected row
+        if next_to_select < len(grid.rows):
+            selection.unselect_all()
+            selection.select_path(next_to_select)
+            self.play_file(self,grid.selected_rows)
+
+
+
+    def openbutton_clicked_event(self, widget, data=None):
+        #let the user choose a path with the directory chooser
+        response, path = prompts.choose_directory()
+    
+        #make certain the user said ok before working
+        if response == gtk.RESPONSE_OK:
+            #make one list of support formats
+            formats = self.supported_video_formats + self.supported_audio_formats
+
+            #make a list of the supported media files
+            media_files = []
+            #iterate through root directory 
+            for root, dirs, files in os.walk(path):
+                #iterate through each file
+                for f in files:
+                    #check if the file is a supported formats
+                    for format in formats:
+                        if f.lower().endswith(format):
+                            #create a URI in a format gstreamer likes
+                            file_uri = "file://" + os.path.join(root,f)
+
+                            #add a dictionary to the list of media files
+                            media_files.append({"File":f,"uri":file_uri, "format":format})
+
+            #remove any children in scrolled window
+            for c in self.ui.scrolledwindow1.get_children():
+                self.ui.scrolledwindow1.remove(c)
+
+            #create the grid with list of dictionaries
+            #only show the File column
+            media_grid = DictionaryGrid(media_files, keys=["File"])
+
+            #hook up to the selection_changed event
+            media_grid.connect("selection_changed", self.play_file)
+
+            #show the grid, and add it to the scrolled window
+            media_grid.show()
+            self.ui.scrolledwindow1.add(media_grid)
+
+    def play_file(self, widget, selected_rows, data=None):
+        self.player.stop()
+        format = selected_rows[0]["format"]
+        current_visual = self.ui.hpaned1.get_child2()
+
+        #check if the format of the current file is audio
+        if format in self.supported_audio_formats:
+            self.song_text.set_property("text",selected_rows[0]["File"])
+            #if it is audio, see if the current visual is
+            #the goocanvas, if it's not, do a swapperoo
+            if current_visual is not self.goocanvas:
+                self.ui.hpaned1.remove(current_visual)
+                self.ui.hpaned1.add2(self.goocanvas)
+        else:
+            #do the same thing for the player
+            if current_visual is not self.player:
+                self.ui.hpaned1.remove(current_visual)
+                self.ui.hpaned1.add2(self.player)
+
+        #go ahead and play the file
+        self.player.uri = selected_rows[-1]["uri"]
+        self.player.play()
+
+
+    def on_preferences_changed(self, widget, data=None):
+        logging.debug('main window received preferences changed')
+        for key in data:
+            logging.debug('preference changed: %s = %s' % (key, preferences[key]))
+
+if __name__ == "__main__":
+    # Support for command line options.  See helpers.py to add more.
+    helpers.parse_options()
+
+    # Run the application.
+    preferences.db_connect()
+    preferences.load()
+    window = SimplePlayerWindow()
+    window.show()
+    gtk.main()
+    preferences.save()

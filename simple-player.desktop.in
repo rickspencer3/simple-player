@@ -1,0 +1,8 @@
+[Desktop Entry]
+_Name=Simple Player
+_Comment=SimplePlayer application
+Categories=GNOME;Utility;
+Exec=simple-player
+Icon=simple-player
+Terminal=false
+Type=Application
